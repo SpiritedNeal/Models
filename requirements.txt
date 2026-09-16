@@ -1,5 +1,7 @@
+fastapi
+uvicorn
 torch
 torchvision
-gradio
-Pillow
 numpy
+Pillow
+python-multipart
