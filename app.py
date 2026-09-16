@@ -22,13 +22,13 @@ CLASS_NAMES = [
 
 app = FastAPI(
 title="Cyclone Intensity API",
-description="Predicts cyclone intensity from IR, Water Vapor, Visible, or combined satellite imagery.",
+description="Cyclone intensity prediction using IR, Water Vapor, Visible, or all three.",
 version="1.0.0"
 )
 
 # ============================================================
 
-# MODEL ARCHITECTURES
+# SINGLE-CHANNEL MODEL
 
 # ============================================================
 
@@ -73,8 +73,15 @@ def __init__(self):
 def forward(self, x):
     x = self.features(x)
     x = self.pool(x)
-    return self.classifier(x)
+    x = self.classifier(x)
+    return x
 ```
+
+# ============================================================
+
+# THREE-CHANNEL MODEL
+
+# ============================================================
 
 class MultiChannelCNN(nn.Module):
 
@@ -117,21 +124,22 @@ def __init__(self):
 def forward(self, x):
     x = self.features(x)
     x = self.pool(x)
-    return self.classifier(x)
+    x = self.classifier(x)
+    return x
 ```
 
 # ============================================================
 
-# LOAD MODELS
+# LOAD MODEL
 
 # ============================================================
 
-def load_single_model(path):
+def load_single_model(filename):
 model = SingleChannelCNN().to(DEVICE)
 
 ```
 state_dict = torch.load(
-    path,
+    filename,
     map_location=DEVICE
 )
 
@@ -141,12 +149,12 @@ model.eval()
 return model
 ```
 
-def load_combined_model(path):
+def load_combined_model(filename):
 model = MultiChannelCNN().to(DEVICE)
 
 ```
 state_dict = torch.load(
-    path,
+    filename,
     map_location=DEVICE
 )
 
@@ -156,12 +164,22 @@ model.eval()
 return model
 ```
 
+# ============================================================
+
+# LOAD ALL FOUR MODELS
+
+# ============================================================
+
+MODELS_LOADED = True
+MODEL_ERROR = None
+
 try:
-ir_model = load_single_model(
-"ir_model.pth"
-)
 
 ```
+ir_model = load_single_model(
+    "ir_model.pth"
+)
+
 water_vapor_model = load_single_model(
     "water_vapor_model.pth"
 )
@@ -173,27 +191,50 @@ visible_model = load_single_model(
 combined_model = load_combined_model(
     "best_cyclone_model.pth"
 )
-
-MODELS_LOADED = True
 ```
 
 except Exception as e:
-MODELS_LOADED = False
-MODEL_ERROR = str(e)
-
-# ============================================================
-
-# IMAGE PROCESSING
-
-# ============================================================
-
-async def read_image(file: UploadFile):
-try:
-data = await file.read()
 
 ```
+MODELS_LOADED = False
+MODEL_ERROR = str(e)
+```
+
+# ============================================================
+
+# MODEL CHECK
+
+# ============================================================
+
+def check_models():
+
+```
+if not MODELS_LOADED:
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"Model loading failed: {MODEL_ERROR}"
+    )
+```
+
+# ============================================================
+
+# IMAGE READING
+
+# ============================================================
+
+async def read_uploaded_image(file: UploadFile):
+
+```
+try:
+
+    data = await file.read()
+
     if not data:
-        raise ValueError("Uploaded file is empty.")
+
+        raise ValueError(
+            "Uploaded file is empty."
+        )
 
     image = Image.open(
         io.BytesIO(data)
@@ -202,18 +243,24 @@ data = await file.read()
     return image.convert("RGB")
 
 except Exception as e:
+
     raise HTTPException(
         status_code=400,
-        detail=f"Invalid image: {e}"
+        detail=f"Could not read image: {e}"
     )
 ```
 
+# ============================================================
+
+# SINGLE CHANNEL PREPROCESSING
+
+# ============================================================
+
 def preprocess_single(image):
-# Convert to grayscale because the single-channel
-# models were trained on one channel.
-image = image.convert("L")
 
 ```
+image = image.convert("L")
+
 image = image.resize(
     (128, 128)
 )
@@ -225,33 +272,39 @@ image = np.array(
 
 image /= 255.0
 
-# H x W -> 1 x H x W
 image = np.expand_dims(
     image,
     axis=0
 )
 
-# 1 x H x W -> 1 x 1 x H x W
-tensor = torch.from_numpy(
+image = torch.from_numpy(
     image
 ).unsqueeze(0)
 
-return tensor.to(DEVICE)
+return image.to(DEVICE)
 ```
+
+# ============================================================
+
+# THREE CHANNEL PREPROCESSING
+
+# ============================================================
 
 def preprocess_combined(
 ir_image,
 water_vapor_image,
 visible_image
 ):
-channels = []
 
 ```
+channels = []
+
 for image in [
     ir_image,
     water_vapor_image,
     visible_image
 ]:
+
     image = image.convert("L")
 
     image = image.resize(
@@ -267,18 +320,16 @@ for image in [
 
     channels.append(image)
 
-# 3 x H x W
 image = np.stack(
     channels,
     axis=0
 )
 
-# 1 x 3 x H x W
-tensor = torch.from_numpy(
+image = torch.from_numpy(
     image
 ).unsqueeze(0)
 
-return tensor.to(DEVICE)
+return image.to(DEVICE)
 ```
 
 # ============================================================
@@ -287,12 +338,17 @@ return tensor.to(DEVICE)
 
 # ============================================================
 
-def predict(model, tensor):
+def make_prediction(
+model,
+image_tensor
+):
 
 ```
 with torch.no_grad():
 
-    output = model(tensor)
+    output = model(
+        image_tensor
+    )
 
     probabilities = torch.softmax(
         output,
@@ -305,45 +361,42 @@ predicted_index = int(
     ).item()
 )
 
-predicted_class = CLASS_NAMES[
+prediction = CLASS_NAMES[
     predicted_index
 ]
 
-probability_dict = {
-    CLASS_NAMES[i]: round(
-        float(probabilities[i].item()),
-        4
+confidence = float(
+    probabilities[
+        predicted_index
+    ].item()
+)
+
+probabilities_dict = {
+    CLASS_NAMES[i]: float(
+        probabilities[i].item()
     )
     for i in range(3)
 }
 
-confidence = round(
-    float(
-        probabilities[predicted_index].item()
-    ),
-    4
-)
-
 return {
-    "prediction": predicted_class,
-    "confidence": confidence,
-    "probabilities": probability_dict
+    "prediction": prediction,
+    "confidence": round(
+        confidence,
+        4
+    ),
+    "probabilities": {
+        key: round(
+            value,
+            4
+        )
+        for key, value in probabilities_dict.items()
+    }
 }
-```
-
-def check_models():
-
-```
-if not MODELS_LOADED:
-    raise HTTPException(
-        status_code=500,
-        detail=f"Models could not be loaded: {MODEL_ERROR}"
-    )
 ```
 
 # ============================================================
 
-# API ENDPOINTS
+# ROOT
 
 # ============================================================
 
@@ -353,7 +406,8 @@ def root():
 ```
 return {
     "status": "online",
-    "message": "Cyclone Intensity API",
+    "service": "Cyclone Intensity API",
+    "models_loaded": MODELS_LOADED,
     "models": [
         "IR",
         "Water Vapor",
@@ -363,21 +417,28 @@ return {
 }
 ```
 
+# ============================================================
+
+# HEALTH CHECK
+
+# ============================================================
+
 @app.get("/health")
 def health():
 
 ```
 return {
-    "status": "healthy",
-    "models_loaded": MODELS_LOADED
+    "status": "healthy" if MODELS_LOADED else "error",
+    "models_loaded": MODELS_LOADED,
+    "model_error": MODEL_ERROR
 }
 ```
 
-# ------------------------------------------------------------
+# ============================================================
 
-# IR
+# IR ENDPOINT
 
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/predict/ir")
 async def predict_ir(
@@ -387,21 +448,25 @@ file: UploadFile = File(...)
 ```
 check_models()
 
-image = await read_image(file)
+image = await read_uploaded_image(
+    file
+)
 
-tensor = preprocess_single(image)
+tensor = preprocess_single(
+    image
+)
 
-return predict(
+return make_prediction(
     ir_model,
     tensor
 )
 ```
 
-# ------------------------------------------------------------
+# ============================================================
 
-# WATER VAPOR
+# WATER VAPOR ENDPOINT
 
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/predict/water-vapor")
 async def predict_water_vapor(
@@ -411,21 +476,25 @@ file: UploadFile = File(...)
 ```
 check_models()
 
-image = await read_image(file)
+image = await read_uploaded_image(
+    file
+)
 
-tensor = preprocess_single(image)
+tensor = preprocess_single(
+    image
+)
 
-return predict(
+return make_prediction(
     water_vapor_model,
     tensor
 )
 ```
 
-# ------------------------------------------------------------
+# ============================================================
 
-# VISIBLE
+# VISIBLE ENDPOINT
 
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/predict/visible")
 async def predict_visible(
@@ -435,21 +504,25 @@ file: UploadFile = File(...)
 ```
 check_models()
 
-image = await read_image(file)
+image = await read_uploaded_image(
+    file
+)
 
-tensor = preprocess_single(image)
+tensor = preprocess_single(
+    image
+)
 
-return predict(
+return make_prediction(
     visible_model,
     tensor
 )
 ```
 
-# ------------------------------------------------------------
+# ============================================================
 
-# COMBINED
+# COMBINED ENDPOINT
 
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/predict/combined")
 async def predict_combined(
@@ -461,13 +534,15 @@ visible: UploadFile = File(...)
 ```
 check_models()
 
-ir_image = await read_image(ir)
+ir_image = await read_uploaded_image(
+    ir
+)
 
-water_vapor_image = await read_image(
+water_vapor_image = await read_uploaded_image(
     water_vapor
 )
 
-visible_image = await read_image(
+visible_image = await read_uploaded_image(
     visible
 )
 
@@ -477,7 +552,7 @@ tensor = preprocess_combined(
     visible_image
 )
 
-return predict(
+return make_prediction(
     combined_model,
     tensor
 )
